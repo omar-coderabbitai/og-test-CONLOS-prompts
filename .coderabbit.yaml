@@ -1,0 +1,512 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: assertive
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  sequence_diagrams: true
+  request_changes_workflow: true
+  suggest_improvements: true
+
+  labeling_instructions: []
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - develop
+      - master
+      - main
+    ignore:
+      # Generated / binary files
+      - "**/*.pbxproj"
+      - "**/*.xcworkspacedata"
+      - "**/*.xcscheme"
+      - "**/*.xctestplan"
+      - "**/*.xcuserstate"
+      - "**/*.xcbkptlist"
+      - "**/xcshareddata/**"
+      - "**/.xccurrentversion"
+      - "**/*.xcdatamodel/**"
+
+      # Dependency manager output
+      - "Pods/**"
+      - "Podfile.lock"
+      - "**/Package.resolved"
+
+      # External / vendored code
+      - "External/**"
+      - ".vendor/**"
+
+      # Build artifacts and configs
+      - "Configs/**"
+      - "build/**"
+
+      # Resources that don't need code review
+      - "**/*.strings"
+      - "**/*.storyboard"
+      - "**/*.xib"
+      - "**/*.xcassets/**"
+      - "**/*.lproj/**"
+      - "**/*.gpx"
+      - "**/*.entitlements"
+
+  # ---------------------------------------------------------------------------
+  # Global Architectural Instructions
+  # ---------------------------------------------------------------------------
+  instructions: |
+    This is the Arlo iOS smart-home security camera app.
+
+    Tech stack:
+    - Swift (primary) and Objective-C (legacy)
+    - iOS 15.0+ deployment target
+    - UIKit only (no SwiftUI except ModesWidget)
+    - MVVM + Coordinator/Router architecture
+    - RxSwift / RxCocoa for reactive programming
+    - CocoaPods + Swift Package Manager for dependencies
+
+    ---------------------------------------------------------------------------
+    ARCHITECTURAL PRINCIPLES
+    ---------------------------------------------------------------------------
+
+    - ViewModels expose inputs as AnyObserver and outputs as Driver
+    - ViewControllers bind using .drive(), never .subscribe()
+    - Coordinators/Routers handle all navigation
+    - Dependencies injected via protocols
+    - Feature flags evaluated in ViewModel or higher layer, never in View
+
+    ---------------------------------------------------------------------------
+    CONCURRENCY RULES
+    ---------------------------------------------------------------------------
+
+    - No unstructured Task {} without cancellation strategy
+    - UI updates must occur on MainScheduler or @MainActor
+    - Do not mix Rx chains and async/await without explicit scheduler control
+    - Avoid blocking calls on main thread
+    - Avoid synchronous disk or network operations on main thread
+
+    ---------------------------------------------------------------------------
+    RXSWIFT RULES
+    ---------------------------------------------------------------------------
+
+    - Always use [weak self] in escaping closures
+    - DisposeBag ownership must match lifecycle (VC vs VM)
+    - Avoid nested subscribe blocks
+    - Avoid using PublishSubject as a state container
+
+    ---------------------------------------------------------------------------
+    RX "READ-ONCE" ANTI-PATTERN DETECTION
+    ---------------------------------------------------------------------------
+
+    Anti-pattern:
+    Using Rx operators such as:
+
+        .first()
+        .take(1)
+        .blockingFirst()
+        .toBlocking().first()
+
+    to retrieve a single value from a stream that represents long-lived state.
+
+    Why this is problematic:
+
+    - Indicates the caller only needs the current value
+    - Suggests the upstream API is modeling state as an event stream
+    - Introduces timing assumptions and race conditions
+    - Encourages defensive reactive code
+    - Hides architectural misuse behind operator chains
+
+    This pattern is a strong signal that state is not being modeled correctly.
+
+    Required Action:
+
+    When .first() or .take(1) is used to read state:
+
+    1. Investigate the upstream subject type
+    2. If it is PublishSubject or ReplaySubject representing state:
+       - Refactor to BehaviorRelay
+       - Expose synchronous accessor (e.g., currentState)
+       - Remove read-once subscription
+
+    Preferred replacement pattern:
+
+        // Instead of:
+        repository.deviceStatus
+            .take(1)
+            .subscribe(onNext: { ... })
+
+        // Refactor upstream to:
+        var currentDeviceStatus: DeviceStatus {
+            deviceStatusRelay.value
+        }
+
+        // Then use:
+        let status = repository.currentDeviceStatus
+
+    Review Classification:
+
+    - If used for state retrieval → BLOCKER
+    - If used for true event streams → allowed
+
+    Exception:
+
+    Using .take(1) for:
+    - Network response streams
+    - One-time UI events
+    - Fire-and-forget signals
+    is acceptable.
+
+    Reviewers should determine intent based on context.
+
+    ---------------------------------------------------------------------------
+    RXSWIFT STATE MODELING ENFORCEMENT
+    ---------------------------------------------------------------------------
+
+    Architectural Rule:
+    State is not an event.
+
+    Long-lived application state must NOT be modeled using:
+    - PublishSubject
+    - ReplaySubject
+    - Observable-only exposure without synchronous accessor
+
+    Anti-pattern:
+    Modeling stateful values (status, state, config, progress, settings,
+    enablement flags, device support, onboarding progress, etc.)
+    using PublishSubject or ReplaySubject.
+
+    Why this is a BLOCKER:
+    - State must be synchronously queryable
+    - PublishSubject does not retain a value
+    - ReplaySubject encourages replay-based thinking
+    - Leads to race conditions and stale UI on re-entry
+    - Forces defensive caching at higher layers
+
+    Required Pattern:
+    - Use BehaviorRelay for state that does not error
+    - Use BehaviorSubject only if error semantics are required
+    - Expose:
+        - Observable stream for propagation
+        - Synchronous accessor for current value
+
+    Required API shape:
+
+        private let stateRelay = BehaviorRelay<StateType>(value: initialValue)
+
+        var state: Observable<StateType> {
+            stateRelay.asObservable()
+        }
+
+        var currentState: StateType {
+            stateRelay.value
+        }
+
+    Review Enforcement:
+
+    If a PR introduces:
+    - PublishSubject representing long-lived state
+    - ReplaySubject(1) used to simulate state
+    - Stateful Observable without synchronous accessor
+
+    Classify as:
+    BLOCKER — must refactor to BehaviorRelay pattern.
+
+    Exception:
+    Event-only streams (button taps, navigation triggers,
+    analytics fire-and-forget events) may use PublishSubject.
+
+    ---------------------------------------------------------------------------
+    CORE DATA RULES
+    ---------------------------------------------------------------------------
+
+    - No main-thread large fetches
+    - Schema changes must support lightweight migration
+    - Do not remove attributes or change optionality without migration plan
+    - Background contexts must merge correctly
+    - .xccurrentversion must match active model version
+
+    ---------------------------------------------------------------------------
+    PERFORMANCE EXPECTATIONS
+    ---------------------------------------------------------------------------
+
+    - No heavy work in viewDidLoad
+    - Avoid repeated repository fetches in lifecycle methods
+    - Large device lists must use efficient diffing
+    - Watch for retain cycles in streaming or long-lived sessions
+
+    ---------------------------------------------------------------------------
+    SECURITY & PRIVACY
+    ---------------------------------------------------------------------------
+
+    - Never log tokens, emails, serial numbers, or PII
+    - Store sensitive data in Keychain, never UserDefaults
+    - No hardcoded production URLs
+    - Validate certificate pinning where applicable
+
+    ---------------------------------------------------------------------------
+    CODE QUALITY RULES
+    ---------------------------------------------------------------------------
+
+    - No force unwrap (!), force cast (as!), or force try (try!)
+    - Use guard let / if let
+    - Use Log.* for logging, never print()
+    - Use Monitor.trace for performance, never Performance.startTrace()
+    - Line length max: 200 characters
+    - Function body max: 200 lines
+    - Commits must reference JIRA (IOSAPP-XXXXX)
+
+    ---------------------------------------------------------------------------
+    TESTING EXPECTATIONS
+    ---------------------------------------------------------------------------
+
+    - Repository or networking changes require unit tests
+    - Time-dependent Rx code must use TestScheduler
+    - Tests must assert behavior, not just absence of crash
+    - Avoid shared mutable state between tests
+
+    ---------------------------------------------------------------------------
+    DEPENDENCY MANAGEMENT
+    ---------------------------------------------------------------------------
+
+    - Prefer SPM for new dependencies
+    - Do not duplicate dependency via Pods + SPM
+    - Adding new pods requires strong justification
+    - Version pinning preferred for stability
+
+    ---------------------------------------------------------------------------
+    REVIEW CLASSIFICATION
+    ---------------------------------------------------------------------------
+
+    Classify feedback as:
+    - BLOCKER (must fix before merge)
+    - ARCHITECTURAL CONCERN
+    - PERFORMANCE RISK
+    - NIT
+
+    ---------------------------------------------------------------------------
+    PROGRAMMATIC UI ARCHITECTURE ENFORCEMENT
+    ---------------------------------------------------------------------------
+
+    Architectural Rule:
+    All UI must be implemented using programmatic UIKit following MVVM+C
+    presentation structure and Arlo’s View / ViewController separation model.
+
+    Storyboards and XIBs are not permitted for new UI.
+
+    ---------------------------------------------------------------------------
+    VIEW / VIEWCONTROLLER RESPONSIBILITY SEPARATION
+    ---------------------------------------------------------------------------
+
+    ViewControllers must NOT implement layout.
+
+    All layout responsibilities must live inside a dedicated UIView subclass.
+
+    Layout responsibilities include:
+    - Creating subviews
+    - Configuring subviews
+    - Constructing view hierarchy
+    - Defining Auto Layout constraints
+
+    ViewControllers are responsible ONLY for:
+    - Binding to ViewModel
+    - Handling user input
+    - Updating the View
+    - Navigation and coordination
+
+    ---------------------------------------------------------------------------
+    REQUIRED VIEW STRUCTURE
+    ---------------------------------------------------------------------------
+
+    Every ViewController must have a corresponding UIView subclass.
+
+    Naming convention:
+    - SettingsViewController
+    - SettingsView
+
+    The View class must:
+
+    - Subclass UIView
+    - Create and configure all subviews
+    - Build the view hierarchy
+    - Define layout constraints
+    - Provide update methods or expose controlled subviews for interaction
+    - Initialize layout in init()
+
+    Required initialization pattern:
+
+        init() {
+            super.init(frame: .zero)
+            setupHierarchy()
+            setupConstraints()
+        }
+
+    Required layout functions:
+
+        func setupHierarchy()
+        func setupConstraints()
+
+    All subviews must set:
+
+        translatesAutoresizingMaskIntoConstraints = false
+
+    ---------------------------------------------------------------------------
+    REQUIRED VIEWCONTROLLER STRUCTURE
+    ---------------------------------------------------------------------------
+
+    ViewControllers must install their custom view using loadView().
+
+    Required pattern:
+
+        override func loadView() {
+            view = CustomView()
+        }
+
+    ViewControllers may expose a typed accessor:
+
+        var customView: CustomView? { view as? CustomView }
+
+    ViewControllers must NOT:
+    - Create layout constraints
+    - Add subviews directly to self.view
+    - Configure view hierarchy
+    - Implement layout logic in viewDidLoad / viewDidLayoutSubviews
+
+    ---------------------------------------------------------------------------
+    PROHIBITED ANTI-PATTERNS (BLOCKERS)
+    ---------------------------------------------------------------------------
+
+    BLOCKER — Layout implemented in ViewController:
+
+    - view.addSubview(...)
+    - NSLayoutConstraint.activate(...) inside ViewController
+    - Subview creation inside ViewController
+    - Constraint creation outside UIView subclass
+    - UI composition logic inside ViewController lifecycle methods
+
+    BLOCKER — Missing dedicated View class for screen layout.
+
+    BLOCKER — Layout code not initialized from View.init().
+
+    BLOCKER — Storyboard or XIB introduced for new UI.
+
+    ---------------------------------------------------------------------------
+    REVIEW ENFORCEMENT
+    ---------------------------------------------------------------------------
+
+    If layout logic appears inside a ViewController:
+    classify as BLOCKER.
+
+    If a new screen does not provide a dedicated UIView class:
+    classify as BLOCKER.
+
+    If programmatic UI does not follow hierarchy → constraints structure:
+    classify as ARCHITECTURAL CONCERN.
+
+    ---------------------------------------------------------------------------
+    INTENT OF THIS RULE
+    ---------------------------------------------------------------------------
+
+    This structure ensures:
+
+    - Smaller, focused ViewControllers
+    - Clear separation of responsibilities
+    - Testable view composition
+    - Consistent UI architecture
+    - Predictable lifecycle behavior
+    - Maintainable MVVM+C boundaries
+
+    The UIView is responsible for layout.
+    The ViewController is responsible for behavior.
+
+  # ---------------------------------------------------------------------------
+  # Path-Specific Instructions
+  # ---------------------------------------------------------------------------
+  path_instructions:
+    - path: "Arlo/Onboarding/**"
+      instructions: |
+        Device onboarding flow — highly complex.
+        Watch for:
+        - BLEOnboardingContext cleanup between attempts
+        - Stale Rx subscriptions across router transitions
+        - dismiss() propagation correctness
+        - Bluetooth permission edge cases
+        - Factory reset stale device references
+
+    - path: "Arlo/Dashboard/**"
+      instructions: |
+        Main home screen.
+        Watch for performance with large device lists
+        and correct handling of MQTT/SSE updates.
+
+    - path: "Arlo/Subscriptions/**"
+      instructions: |
+        StoreKit integration and subscription state transitions.
+        Ensure receipt validation and plan state correctness.
+
+    - path: "Arlo/Login/**"
+      instructions: |
+        OAuth and session management.
+        Ensure tokens stored in Keychain.
+        Verify full cleanup on logout.
+
+    - path: "Arlo/Automation/**"
+      instructions: |
+        Automation framework.
+        Watch cache invalidation and server sync consistency.
+
+    - path: "Arlo/Devices/**"
+      instructions: |
+        Device capability checks required before enabling features.
+
+    - path: "Arlo/Library/**"
+      instructions: |
+        Video player lifecycle, memory usage, scrubbing performance.
+
+    - path: "Common/**"
+      instructions: |
+        Wide blast radius — review carefully.
+
+    - path: "ArloCore/**"
+      instructions: |
+        Core framework.
+        BLOCKER enforcement of Rx state modeling rule applies here.
+        Watch thread safety in Core Data contexts.
+
+    - path: "ArloNetworking/**"
+      instructions: |
+        Network layer.
+        Watch error handling and token refresh flows.
+
+    - path: "ArloBLE/**"
+      instructions: |
+        CoreBluetooth lifecycle and background mode compliance.
+
+    - path: "ArloAutomations/**"
+      instructions: |
+        CachedRepository patterns.
+        Ensure revision tracking and consistency.
+
+    - path: "**/*Tests*/**"
+      instructions: |
+        Ensure test isolation and meaningful assertions.
+
+    - path: "Podfile"
+      instructions: |
+        Prefer SPM.
+        Avoid dependency duplication.
+        Review post-install scripts carefully.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  learnings:
+    scope: auto
+  jira:
+    project_keys:
+      - IOSAPP
+  linear:
+    team_keys: []
